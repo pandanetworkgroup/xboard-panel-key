@@ -340,8 +340,8 @@ private function resolveNodePanelUrl(Request $request): string
 ```
 
 **为什么用 `server_ws_url` 而不是 `app_url`**：
-- `app_url` 是订阅用的"面板面板域名"（例：`https://pan.178278.xyz`）
-- `server_ws_url` 才是 node 实际 WebSocket 通信用的域名（例：`wss://node.178278.xyz/ws`）
+- `app_url` 是订阅用的"面板域名"（例：`https://panel.your-domain.com`）
+- `server_ws_url` 才是 node 实际 WebSocket 通信用的域名（例：`wss://node.your-domain.com/ws`）
 - `xboard-node-key` 的 `install.sh` 把 `--panel` 写入 `config.yml` 的 `panel.url`，node 用它推导 ws 地址；如果用 `app_url`，node 会去连订阅域名而非 ws 域名，可能导致 404 或证书错误
 - 把 `wss://node.example.com/ws` 转换成 `https://node.example.com`（剥协议 + 路径），node 二进制内部会再加回 `wss://` 和 `/ws`
 
@@ -380,6 +380,28 @@ Reality 协议本身不需要 cert pinning。如果某节点 `protocol_settings.
 5. 用各客户端 UA 拉订阅验证 cert pinning 字段
 
 回滚顺序反过来：先回滚面板侧（让订阅不再要求 cert），再回滚 Node 侧（停止上报 cert）。
+
+---
+
+## 11.5 已验证部署
+
+本补丁包已在生产环境（Xboard docker 容器 + 宝塔/Nginx 反代 :80 + Caddy :7001）端到端部署验证通过。安装脚本一遍跑完 9 个阶段：备份 → docker cp → 防御性剥 BOM → `php -l` → `artisan optimize:clear` → `docker restart` → HTTP 自检 `http://127.0.0.1/` → 返回 200。
+
+部署后容器内各文件字节数（供你部署后对照；不同补丁版本略有浮动）：
+
+```
+Protocols/Clash.php                                                 13783
+Protocols/ClashMeta.php                                             35263
+Protocols/General.php                                               40344
+Protocols/SingBox.php                                               35982
+Protocols/Stash.php                                                 26143
+Protocols/Surfboard.php                                              9849
+Protocols/Surge.php                                                 14226
+Services/ServerService.php                                          16506
+Http/Controllers/V2/Admin/Server/MachineController.php              8067
+```
+
+原始 `MachineController.php` 约 6617 字节；打补丁后 8067 字节（新增 `resolveNodePanelUrl()` 方法 + 重写 `buildInstallCommand()`）。如果部署后该文件仍是 ~6617 字节，说明第 9 个文件没有落地。
 
 ---
 
