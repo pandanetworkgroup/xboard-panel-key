@@ -1,2 +1,291 @@
 # xboard-panel-key
-Xboard panel-side PHP files with cert fingerprint pin (deploy + rollback)
+
+Server-side (panel-side) **cert-fingerprint / cert-pinning** patch bundle for [Xboard](https://github.com/cedar2025/Xboard).
+
+This repo ships the patched PHP files and a single installer script that
+deploys them into a running Xboard docker container, plus a rollback path.
+
+> Pair with the node-side companion repo: <https://github.com/pandanetworkgroup/xboard-node-key>
+
+---
+
+## What this does
+
+Xboard nodes that use self-signed TLS certificates (hysteria2 / tuic / anytls /
+vless+TLS / trojan+TLS / vmess+TLS) used to emit `insecure: true` /
+`allow_insecure: true` to every client, which silences certificate verification
+and exposes users to MITM attacks.
+
+This patch makes the panel inject **certificate pinning** instead:
+
+| Client                                | Pinning field                                          |
+| ------------------------------------- | ------------------------------------------------------ |
+| sing-box                              | `certificate` + `certificate_public_key_sha256`        |
+| Clash Meta / Stash                    | `fingerprint` + `skip-cert-verify:false`               |
+| Surge / Surfboard                     | `server-cert-fingerprint-sha256`                       |
+| v2rayN                                | `v2rayn://` JSON: `CertSha` + `Cert`                   |
+| v2rayNG / general / passwall / ssrplus / sagernet | URI `pcs` / `pinSHA256` params             |
+| Clash (original)                      | inline `ca-pem` + `skip-cert-verify:false`             |
+
+The 8 patched files cover **all** subscription routes that Xboard ships.
+
+## Files in this repo
+
+| File                              | Purpose                                                        |
+| --------------------------------- | ------------------------------------------------------------- |
+| `install-panel.sh`                | Deploy + rollback script (bash, pure-ASCII, runs on the panel host) |
+| `README.md`                       | This document                                                 |
+| Release asset `cert-deploy-bundle.tar.gz` | 8 patched PHP files (BOM-stripped, POSIX paths)        |
+
+### The 8 patched PHP files
+
+| File                              | Role                                                                 |
+| --------------------------------- | ------------------------------------------------------------------- |
+| `Protocols/General.php`           | UA routing, `computeCertSha256()`, v2rayN format, v2rayNG `pcs`/`pinSHA256`, hysteria2/tuic/anytls cert injection, `buildTuic` cert-pinning fix |
+| `Protocols/SingBox.php`           | `applyCertFingerprint()` for sing-box subscriptions                  |
+| `Protocols/ClashMeta.php`         | `applyCertFingerprint()` + SPKI sha256 for Clash Meta                |
+| `Protocols/Stash.php`             | Same as ClashMeta                                                   |
+| `Protocols/Clash.php`             | Inline `ca-pem` + `skip-cert-verify:false` for original Clash       |
+| `Protocols/Surge.php`             | `server-cert-fingerprint-sha256` for Surge                           |
+| `Protocols/Surfboard.php`         | Same as Surge                                                       |
+| `Services/ServerService.php`      | Persist `cert_fingerprint` + `cert_pem` to DB (writes only on change) |
+
+---
+
+## Requirements
+
+The script runs **on the panel host** (the machine that runs the Xboard docker
+container). It needs:
+
+- `root` (or `sudo`) for docker access
+- `docker` CLI on `PATH`
+- The Xboard container running (default name: `xboard-xboard-1`)
+- Internet access to `raw.githubusercontent.com` / `api.github.com`
+  (unless you pass `--bundle` for offline install)
+
+Before deploying, **make sure the node-side patch has already been deployed**
+to every node that should report cert info. Otherwise the DB will not have
+`cert_fingerprint` / `cert_pem` and the panel will keep emitting
+`insecure: true`.
+
+> <https://github.com/pandanetworkgroup/xboard-node-key>
+
+---
+
+## Quick start (recommended)
+
+### One-line deploy
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/pandanetworkgroup/xboard-panel-key/main/install-panel.sh \
+  | sudo bash -s -
+```
+
+This will:
+
+1. Download `cert-deploy-bundle.tar.gz` from the latest GitHub release
+2. Back up the current 8 PHP files from the container to `/root/php_pre_cert_deploy/`
+   (only if no backup exists yet)
+3. Copy the 8 new PHP files into the container at `/www/app/...`
+4. Strip any UTF-8 BOM defensively (idempotent)
+5. Run `php -l` on all 8 files — auto-rolls back on syntax error
+6. Run `php /www/artisan optimize:clear`
+7. `docker restart xboard-xboard-1`
+8. HTTP self-test against `http://127.0.0.1:7001/` then `http://127.0.0.1/`
+9. Print a verify command for you to run 60-90s later
+
+### Interactive deploy (download first)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/pandanetworkgroup/xboard-panel-key/main/install-panel.sh -o install-panel.sh
+sudo bash install-panel.sh
+sudo bash install-panel.sh --help
+```
+
+### Offline deploy (air-gapped host)
+
+Download the bundle on a machine with internet, copy both files to the panel
+host, then run:
+
+```bash
+sudo bash install-panel.sh --bundle ./cert-deploy-bundle.tar.gz
+```
+
+---
+
+## Rollback
+
+There are two rollback behaviors:
+
+### Default rollback (also clears DB cert fields)
+
+Restores the 8 PHP files from `/root/php_pre_cert_deploy/`, **and** nulls
+`cert_fingerprint` + `cert_pem` in the `v2_server` table. Clients will go back
+to `insecure: true` immediately on next subscription fetch.
+
+```bash
+sudo bash install-panel.sh --rollback
+```
+
+### Soft rollback (keep DB cert fields)
+
+Restores the 8 original PHP files, but leaves the cert fields in the DB
+untouched. Useful if you only need to revert code changes but want the
+node-reported cert data to remain available for inspection.
+
+```bash
+sudo bash install-panel.sh --rollback --keep-db
+```
+
+> If no `/root/php_pre_cert_deploy/` is found, rollback will refuse to proceed.
+
+---
+
+## CLI reference
+
+```
+Xboard panel-side cert-fingerprint installer (deploy / rollback)
+
+Args:
+  --rollback               rollback to the pre-deploy backup (default also clears DB)
+  --keep-db                rollback only, keep cert_fingerprint / cert_pem in DB
+  --container NAME         xboard docker container name (default: xboard-xboard-1)
+  --backup-dir DIR         host backup dir (default: /root/php_pre_cert_deploy)
+  --work-dir DIR           host working dir for unpack (default: /root/cert-deploy-work)
+  --health-url URL         health-check URL (repeatable; default: http://127.0.0.1:7001/ , http://127.0.0.1/)
+  --bundle PATH            use a local tar.gz bundle instead of downloading from GitHub
+  --release-tag TAG        github release tag to fetch (default: latest)
+  --force-rebackup         re-take a backup even if one already exists
+  --skip-selftest          skip the final HTTP self-test
+  -h, --help               show this help
+```
+
+### Common overrides
+
+Non-default container name:
+
+```bash
+sudo bash install-panel.sh --container my-xboard-1
+```
+
+Panel exposed on a non-default port (via Baota/Nginx proxy on 80):
+
+```bash
+sudo bash install-panel.sh --health-url http://127.0.0.1/
+```
+
+---
+
+## How verification works
+
+After deploy, wait 60-90s for nodes to republish cert info via WebSocket, then
+inspect the DB:
+
+```bash
+# How many servers currently have cert_fingerprint in DB
+docker exec xboard-xboard-1 php /www/artisan tinker --execute \
+  'use App\Models\Server; echo "with-cert: " . Server::whereNotNull("cert_fingerprint")->count() . "/total: " . Server::count() . "\n";'
+```
+
+Then fetch a subscription with each client User-Agent and grep for the pinning
+fields. For example:
+
+```bash
+# sing-box: should contain certificate_public_key_sha256
+curl -fsSL -A 'sing-box/1.8' 'https://your-panel-domain.com/api/v1/client/subscribe?token=YOUR_TOKEN' | grep certificate_public_key_sha256
+
+# Clash Meta: should contain "fingerprint:" and skip-cert-verify:false
+curl -fsSL -A 'clash.meta' 'https://your-panel-domain.com/api/v1/client/subscribe?token=YOUR_TOKEN' | grep -E 'fingerprint:|skip-cert-verify'
+
+# Surge: should contain server-cert-fingerprint-sha256
+curl -fsSL -A 'Surge/4' 'https://your-panel-domain.com/api/v1/client/subscribe?token=YOUR_TOKEN' | grep server-cert-fingerprint-sha256
+```
+
+---
+
+## Operational notes
+
+### UTF-8 BOM
+
+Windows-edited PHP files often carry a UTF-8 BOM (`EF BB BF`). In PHP this
+causes `Fatal error: Namespace declaration statement has to be the very first
+statement`. The bundle in this repo is already BOM-free, and the installer also
+strips BOM defensively inside the container (idempotent — safe to run on a
+file that has no BOM).
+
+### OPcache
+
+`php -l` and `artisan optimize:clear` do **not** clear OPcache. The installer
+always `docker restart`s the container so the new bytecode actually takes
+effect. Do not skip the restart step.
+
+### Recovery if `php -l` fails
+
+The installer runs `php -l` on all 8 files *after* copying them into the
+container. If any file fails the syntax check, the installer **automatically
+restores the previous files from `$BACKUP_DIR`**, clears the cache, and exits
+with a non-zero code. The container is left in its pre-deploy state.
+
+### Backup retention
+
+The first successful deploy writes `/root/php_pre_cert_deploy/`. Subsequent
+deploys keep that backup untouched (so you can always roll back to the
+**original** state, not to some intermediate state). Pass `--force-rebackup`
+to override this — useful only if your "original" was not actually original.
+
+---
+
+## Release asset
+
+The release asset `cert-deploy-bundle.tar.gz` contains exactly these 8 files
+with POSIX-style (forward-slash) paths:
+
+```
+Protocols/Clash.php
+Protocols/ClashMeta.php
+Protocols/General.php
+Protocols/SingBox.php
+Protocols/Stash.php
+Protocols/Surfboard.php
+Protocols/Surge.php
+Services/ServerService.php
+```
+
+You can repack locally from a checked-out source tree with:
+
+```bash
+tar -czf cert-deploy-bundle.tar.gz \
+    Protocols/Clash.php \
+    Protocols/ClashMeta.php \
+    Protocols/General.php \
+    Protocols/SingBox.php \
+    Protocols/Stash.php \
+    Protocols/Surfboard.php \
+    Protocols/Surge.php \
+    Services/ServerService.php
+```
+
+---
+
+## Companion repo (node-side)
+
+The panel only generates correct subscription output if the panel DB has
+`cert_fingerprint` + `cert_pem` for each server. Those fields are populated by
+the **node-side** patch (modified `xboard-node` binary that reports cert info
+via WebSocket).
+
+Deploy the node-side patch on every node host:
+
+> <https://github.com/pandanetworkgroup/xboard-node-key>
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/pandanetworkgroup/xboard-node-key/main/install.sh \
+  | sudo bash -s -- --mode machine --panel 'https://your-panel-domain.com' \
+                       --token 'machine_token_here' --machine-id 1
+```
+
+---
+
+## License
+
+Same as the upstream Xboard project. See the Xboard repo for details.
