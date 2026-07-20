@@ -67,6 +67,7 @@ PHP_FILES=(
     "Protocols/Surfboard.php"
     "Protocols/Surge.php"
     "Services/ServerService.php"
+    "Http/Controllers/V2/Admin/Server/MachineController.php"
 )
 APP_ROOT="/www/app"
 
@@ -109,13 +110,18 @@ Rollback (default also clears DB cert fields):
 Offline deploy with a local bundle:
   sudo bash install-panel.sh --bundle ./cert-deploy-bundle.tar.gz
 
+Deploys 9 PHP files:
+  8 cert-pinning patch files (Protocols/* + Services/ServerService.php)
+  1 admin MachineController.php -> renders the xboard-node-key one-liner on the
+  /server/machine page, using server_ws_url host as --panel
+
 Args:
   --rollback               rollback to the pre-deploy backup (default also clears DB)
   --keep-db                rollback only, keep cert_fingerprint / cert_pem in DB
   --container NAME         xboard docker container name (default: xboard-xboard-1)
   --backup-dir DIR         host backup dir (default: /root/php_pre_cert_deploy)
   --work-dir DIR           host working dir for unpack (default: /root/cert-deploy-work)
-  --health-url URL         health-check URL (repeatable; default: http://127.0.0.1:7001/ , http://127.0.0.1/)
+  --health-url URL         health-check URL (repeatable; default: http://127.0.0.1/ , http://127.0.0.1:7001/)
   --bundle PATH            use a local tar.gz bundle instead of downloading from GitHub
   --release-tag TAG        github release tag to fetch (default: latest)
   --force-rebackup         re-take a backup even if one already exists
@@ -285,11 +291,11 @@ do_deploy() {
                 die "failed to backup $rel from container"
             fi
         done
-        log "backup ok: 8 files in flat layout"
+        log "backup ok: 9 files in flat layout"
     fi
 
     # ---- Step 4: copy new PHP files into the container ----
-    log "deploying 8 PHP files into $CONTAINER:$APP_ROOT"
+    log "deploying 9 PHP files into $CONTAINER:$APP_ROOT"
     for rel in "${PHP_FILES[@]}"; do
         docker cp "$WORK_DIR/$rel" "$CONTAINER:$APP_ROOT/$rel"
     done
@@ -301,7 +307,7 @@ do_deploy() {
     done
 
     # ---- Step 6: php -l syntax check ----
-    log "running php -l on all 8 files"
+    log "running php -l on all 9 files"
     local lint_fail=0
     for rel in "${PHP_FILES[@]}"; do
         if php_lint_in_container "$APP_ROOT/$rel"; then
@@ -431,7 +437,8 @@ echo
 log "============ done ============"
 if [ "$MODE" = "deploy" ]; then
     log "next: wait 60-90s for node websockets to republish cert_fingerprint / cert_pem"
-    log "verify: docker exec $CONTAINER php /www/artisan tinker --execute='use App\\Models\\Server; echo Server::whereNotNull(\"cert_fingerprint\")->count();'"
+    log "verify: docker exec $CONTAINER php /www/artisan tinker --execute='use App\Models\Server; echo Server::whereNotNull("cert_fingerprint")->count();'"
+    log "machine install cmd uses xboard-node-key repo with server_ws_url host as --panel"
     log "rollback later: sudo bash install-panel.sh --rollback"
 elif [ "$MODE" = "rollback" ]; then
     if [ $KEEP_DB -eq 1 ]; then
