@@ -27,7 +27,37 @@ This patch makes the panel inject **certificate pinning** instead:
 | v2rayNG / general / passwall / ssrplus / sagernet | URI `pcs` / `pinSHA256` params             |
 | Clash (original)                      | inline `ca-pem` + `skip-cert-verify:false`             |
 
-The 8 patched files cover **all** subscription routes that Xboard ships.
+The 9 patched files cover **all** subscription routes that Xboard ships, plus
+the admin `/server/machine` page so that the "install node" one-liner it shows
+points at the patched `xboard-node-key` repo (and uses `server_ws_url` host
+as `--panel`).
+
+## Machine page install command (`/server/machine`)
+
+This is the 9th file (`Http/Controllers/V2/Admin/Server/MachineController.php`).
+
+The admin machine page used to show:
+
+```
+curl -fsSL https://raw.githubusercontent.com/cedar2025/xboard-node/dev/install.sh \
+  | sudo bash -s -- --mode machine --panel <app_url> --token <token> --machine-id N
+```
+
+After this patch it shows:
+
+```
+curl -fsSL https://raw.githubusercontent.com/pandanetworkgroup/xboard-node-key/main/install.sh \
+  | sudo bash -s -- --mode machine --panel <server_ws_url host> --token <token> --machine-id N
+```
+
+`--panel` derivation priority (handled by `resolveNodePanelUrl()`):
+
+1. `server_ws_url` host  — e.g. `wss://node.example.com/ws` -> `https://node.example.com`
+   (preferred: that is the host the node will actually open the WebSocket to)
+2. `app_url` setting     — e.g. `https://panel.example.com`
+3. current request scheme + host (last-resort fallback)
+
+`--token` and `--machine-id` are unchanged from the upstream implementation.
 
 ## Files in this repo
 
@@ -35,9 +65,10 @@ The 8 patched files cover **all** subscription routes that Xboard ships.
 | --------------------------------- | ------------------------------------------------------------- |
 | `install-panel.sh`                | Deploy + rollback script (bash, pure-ASCII, runs on the panel host) |
 | `README.md`                       | This document                                                 |
-| Release asset `cert-deploy-bundle.tar.gz` | 8 patched PHP files (BOM-stripped, POSIX paths)        |
+| `GUIDE.zh-CN.md`                  | Chinese deployment guide with per-file patch details          |
+| Release asset `cert-deploy-bundle.tar.gz` | 9 patched PHP files (BOM-stripped, POSIX paths)        |
 
-### The 8 patched PHP files
+### The 9 patched PHP files
 
 | File                              | Role                                                                 |
 | --------------------------------- | ------------------------------------------------------------------- |
@@ -49,6 +80,7 @@ The 8 patched files cover **all** subscription routes that Xboard ships.
 | `Protocols/Surge.php`             | `server-cert-fingerprint-sha256` for Surge                           |
 | `Protocols/Surfboard.php`         | Same as Surge                                                       |
 | `Services/ServerService.php`      | Persist `cert_fingerprint` + `cert_pem` to DB (writes only on change) |
+| `Http/Controllers/V2/Admin/Server/MachineController.php` | Rewrites `buildInstallCommand()` to emit the `xboard-node-key` one-liner with `--panel` derived from `server_ws_url` host |
 
 ---
 
@@ -84,11 +116,11 @@ curl -fsSL https://raw.githubusercontent.com/pandanetworkgroup/xboard-panel-key/
 This will:
 
 1. Download `cert-deploy-bundle.tar.gz` from the latest GitHub release
-2. Back up the current 8 PHP files from the container to `/root/php_pre_cert_deploy/`
+2. Back up the current 9 PHP files from the container to `/root/php_pre_cert_deploy/`
    (only if no backup exists yet)
-3. Copy the 8 new PHP files into the container at `/www/app/...`
+3. Copy the 9 new PHP files into the container at `/www/app/...`
 4. Strip any UTF-8 BOM defensively (idempotent)
-5. Run `php -l` on all 8 files — auto-rolls back on syntax error
+5. Run `php -l` on all 9 files — auto-rolls back on syntax error
 6. Run `php /www/artisan optimize:clear`
 7. `docker restart xboard-xboard-1`
 8. HTTP self-test against `http://127.0.0.1:7001/` then `http://127.0.0.1/`
@@ -237,7 +269,7 @@ to override this — useful only if your "original" was not actually original.
 
 ## Release asset
 
-The release asset `cert-deploy-bundle.tar.gz` contains exactly these 8 files
+The release asset `cert-deploy-bundle.tar.gz` contains exactly these 9 files
 with POSIX-style (forward-slash) paths:
 
 ```
@@ -249,6 +281,7 @@ Protocols/Stash.php
 Protocols/Surfboard.php
 Protocols/Surge.php
 Services/ServerService.php
+Http/Controllers/V2/Admin/Server/MachineController.php
 ```
 
 You can repack locally from a checked-out source tree with:
@@ -262,7 +295,8 @@ tar -czf cert-deploy-bundle.tar.gz \
     Protocols/Stash.php \
     Protocols/Surfboard.php \
     Protocols/Surge.php \
-    Services/ServerService.php
+    Services/ServerService.php \
+    Http/Controllers/V2/Admin/Server/MachineController.php
 ```
 
 ---
