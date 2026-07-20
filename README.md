@@ -301,6 +301,36 @@ tar -czf cert-deploy-bundle.tar.gz \
 
 ---
 
+## Validated deployment
+
+This bundle has been deployed end-to-end on a production Xboard panel host
+(docker container, Baota+Nginx reverse proxy on :80, Caddy on :7001). The
+installer ran cleanly through all 9 stages: backup -> copy -> BOM strip ->
+`php -l` -> `artisan optimize:clear` -> `docker restart` -> HTTP self-test
+`http://127.0.0.1/` -> HTTP 200.
+
+Post-deploy file sizes inside the container (for your reference when verifying
+your own deploy; absolute sizes may shift slightly with patch revisions):
+
+```
+Protocols/Clash.php                                                 13783
+Protocols/ClashMeta.php                                             35263
+Protocols/General.php                                               40344
+Protocols/SingBox.php                                               35982
+Protocols/Stash.php                                                 26143
+Protocols/Surfboard.php                                              9849
+Protocols/Surge.php                                                 14226
+Services/ServerService.php                                          16506
+Http/Controllers/V2/Admin/Server/MachineController.php              8067
+```
+
+The original `MachineController.php` is ~6617 bytes; after the patch it is
+8067 bytes (the `resolveNodePanelUrl()` method + rewired
+`buildInstallCommand()`). If your post-deploy size on that file is still
+~6617, the 9th file did not land.
+
+---
+
 ## Companion repo (node-side)
 
 The panel only generates correct subscription output if the panel DB has
