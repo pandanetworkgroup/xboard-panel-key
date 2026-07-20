@@ -46,8 +46,10 @@ SCRIPT_VERSION="1.0.0"
 # Default container name (Xboard docker-compose default)
 DEF_CONTAINER="xboard-xboard-1"
 
-# Health-check URL candidates tried in order (first wins)
-DEF_HEALTH_URLS=( "http://127.0.0.1:7001/" "http://127.0.0.1/" )
+# Health-check URL candidates tried in order (first wins).
+# Order rationale: most Baota/Nginx-proxied setups return 200 on :80 while
+# the bare Caddy in :7001 may return 403 on '/'. Try :80 first.
+DEF_HEALTH_URLS=( "http://127.0.0.1/" "http://127.0.0.1:7001/" )
 
 # Where the pre-deploy backup is kept on the host
 DEF_BACKUP_DIR="/root/php_pre_cert_deploy"
@@ -161,6 +163,40 @@ fi
 
 # ==================== Helpers ====================
 
+# Locate a backup file by basename. Supports both layouts:
+#   flat:   $BACKUP_DIR/<name>            (created by this script)
+#   nested: $BACKUP_DIR/Protocols/<name>  (created by manual docker cp of whole dirs)
+#           $BACKUP_DIR/Services/<name>
+find_backup_file() {
+    local name="$1"  # e.g. Clash.php or ServerService.php
+    if [ -f "$BACKUP_DIR/$name" ]; then
+        echo "$BACKUP_DIR/$name"
+        return 0
+    fi
+    if [ "$name" = "ServerService.php" ] && [ -f "$BACKUP_DIR/Services/$name" ]; then
+        echo "$BACKUP_DIR/Services/$name"
+        return 0
+    fi
+    if [ -f "$BACKUP_DIR/Protocols/$name" ]; then
+        echo "$BACKUP_DIR/Protocols/$name"
+        return 0
+    fi
+    return 1
+}
+
+# Return the number of backup files actually present (flat or nested).
+count_backup_files() {
+    local n=0
+    for rel in "${PHP_FILES[@]}"; do
+        local name
+        name=$(basename "$rel")
+        if find_backup_file "$name" >/dev/null 2>&1; then
+            n=$((n+1))
+        fi
+    done
+    echo "$n"
+}
+
 # Strip UTF-8 BOM (EF BB BF) from a file inside the container, if present.
 strip_bom_in_container() {
     local cpath="$1"
@@ -226,13 +262,22 @@ do_deploy() {
     [ "$missing" -eq 0 ] || die "bundle is incomplete. refusing to deploy."
 
     # ---- Step 3: take a backup of the current PHP files (once) ----
-    if [ -d "$BACKUP_DIR" ] && [ "$(ls -A "$BACKUP_DIR" 2>/dev/null | wc -l)" -gt 0 ] && [ $FORCE_REBACKUP -eq 0 ]; then
-        log "backup already exists at $BACKUP_DIR -> keep it (use --force-rebackup to redo)"
+    # A backup is considered valid if at least one PHP file is findable (flat or nested).
+    local existing_n
+    existing_n=$(count_backup_files)
+    if [ "$existing_n" -gt 0 ] && [ $FORCE_REBACKUP -eq 0 ]; then
+        log "backup already exists at $BACKUP_DIR ($existing_n/8 files findable) -> keep it (use --force-rebackup to redo)"
     else
-        log "taking backup of current PHP files -> $BACKUP_DIR"
+        log "taking backup of current PHP files -> $BACKUP_DIR (flat layout)"
         mkdir -p "$BACKUP_DIR"
-        rm -rf "$BACKUP_DIR"/*
-        # Copy Protocols dir flat into backup (filenames are unique)
+        if [ $FORCE_REBACKUP -eq 1 ] && [ "$(ls -A "$BACKUP_DIR" 2>/dev/null | wc -l)" -gt 0 ]; then
+            # Wipe only flat files we own; leave any nested dirs alone for safety
+            for rel in "${PHP_FILES[@]}"; do
+                name=$(basename "$rel")
+                [ -f "$BACKUP_DIR/$name" ] && rm -f "$BACKUP_DIR/$name"
+            done
+        fi
+        # Copy each PHP file flat into backup (filenames are unique across Protocols+Services)
         for rel in "${PHP_FILES[@]}"; do
             local name
             name=$(basename "$rel")
@@ -240,7 +285,7 @@ do_deploy() {
                 die "failed to backup $rel from container"
             fi
         done
-        log "backup ok: $(ls -1 "$BACKUP_DIR" | wc -l) files"
+        log "backup ok: 8 files in flat layout"
     fi
 
     # ---- Step 4: copy new PHP files into the container ----
@@ -290,9 +335,9 @@ do_rollback() {
     log "mode: rollback"
     [ -d "$BACKUP_DIR" ] || die "no backup dir at $BACKUP_DIR. nothing to roll back to."
     local n
-    n=$(ls -1 "$BACKUP_DIR" 2>/dev/null | wc -l)
-    [ "$n" -gt 0 ] || die "backup dir $BACKUP_DIR is empty. nothing to roll back to."
-    log "backup files: $n"
+    n=$(count_backup_files)
+    [ "$n" -gt 0 ] || die "backup dir $BACKUP_DIR has no findable PHP files (flat or nested). nothing to roll back to."
+    log "backup files findable: $n/8"
 
     restore_from_backup
 
@@ -310,18 +355,26 @@ do_rollback() {
     do_selftest
 }
 
-# Restore PHP files from $BACKUP_DIR into the container
+# Restore PHP files from $BACKUP_DIR into the container (flat or nested layout)
 restore_from_backup() {
     log "restoring PHP files from $BACKUP_DIR"
+    local restored=0
     for rel in "${PHP_FILES[@]}"; do
         local name
         name=$(basename "$rel")
-        if [ ! -f "$BACKUP_DIR/$name" ]; then
-            warn "missing in backup: $name -> skip"
-            continue
+        local src
+        if src=$(find_backup_file "$name"); then
+            docker cp "$src" "$CONTAINER:$APP_ROOT/$rel"
+            restored=$((restored+1))
+        else
+            warn "missing in backup: $name -> skip (container copy left untouched)"
         fi
-        docker cp "$BACKUP_DIR/$name" "$CONTAINER:$APP_ROOT/$rel"
     done
+    if [ "$restored" -eq 0 ]; then
+        warn "no backup files were restored. check $BACKUP_DIR layout."
+    else
+        log "restored $restored/8 files"
+    fi
 
     log "stripping BOM defensively"
     for rel in "${PHP_FILES[@]}"; do
