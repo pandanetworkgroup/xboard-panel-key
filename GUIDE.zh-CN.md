@@ -1,6 +1,6 @@
 # Xboard 面板侧证书指纹（Cert Fingerprint）部署指南
 
-本仓库为 [Xboard](https://github.com/cedar2025/Xboard) 面板提供**证书固定（Certificate Pinning）**补丁，覆盖 8 类主流客户端订阅格式。
+本仓库为 [Xboard](https://github.com/cedar2025/Xboard) 面板提供**证书固定（Certificate Pinning）**补丁，覆盖 8 类主流客户端订阅格式，并改写 admin 端 `/server/machine` 页面的安装命令模板。
 
 > 配套 Node 侧补丁仓库：<https://github.com/pandanetworkgroup/xboard-node-key>
 
@@ -21,7 +21,7 @@
 | v2rayNG / general / passwall / ssrplus / sagernet | URI `pcs` / `pinSHA256` 参数 |
 | Clash 原版 | 内联 `ca-pem` + `skip-cert-verify:false` |
 
-8 个补丁文件覆盖 Xboard 自带的所有订阅路由。
+9 个补丁文件覆盖 Xboard 自带的所有订阅路由，外加 admin 端机器管理页面的安装命令模板。
 
 ---
 
@@ -84,10 +84,10 @@ curl -fsSL https://raw.githubusercontent.com/pandanetworkgroup/xboard-panel-key/
 脚本会自动完成：
 
 1. 从 GitHub Release 下载 `cert-deploy-bundle.tar.gz`
-2. 把容器内当前 8 个 PHP 文件备份到 `/root/php_pre_cert_deploy/`（仅当该目录为空时；已存在则跳过以保护初始备份）
-3. 将 8 个补丁版 PHP 文件 `docker cp` 进容器 `/www/app/...`
+2. 把容器内当前 9 个 PHP 文件备份到 `/root/php_pre_cert_deploy/`（仅当该目录为空时；已存在则跳过以保护初始备份）
+3. 将 9 个补丁版 PHP 文件 `docker cp` 进容器 `/www/app/...`
 4. 容器内 `sed` 防御性剥除 UTF-8 BOM（幂等）
-5. 对 8 个文件逐个执行 `php -l` 语法检查；任一失败**自动回滚**后退出
+5. 对 9 个文件逐个执行 `php -l` 语法检查；任一失败**自动回滚**后退出
 6. `docker exec ... php /www/artisan optimize:clear` 清 Laravel 缓存
 7. `docker restart <容器>` 重启容器使新字节码生效（OPcache 必须重启才更新）
 8. 对 `http://127.0.0.1/` 和 `http://127.0.0.1:7001/` 做健康自检
@@ -209,7 +209,7 @@ Windows 编辑过的 PHP 文件常带 UTF-8 BOM（`EF BB BF`）。PHP 会报 `Fa
 
 ---
 
-## 9. 8 个 PHP 文件改动明细
+## 9. 9 个 PHP 文件改动明细
 
 ### 9.1 文件清单
 
@@ -223,6 +223,7 @@ Windows 编辑过的 PHP 文件常带 UTF-8 BOM（`EF BB BF`）。PHP 会报 `Fa
 | `Protocols/Surge.php` | +357 B | 新增 `computeCertSha256()`；6 处调用注入 `server-cert-fingerprint-sha256` |
 | `Protocols/Surfboard.php` | +257 B | 同 Surge，3 处调用 |
 | `Services/ServerService.php` | +1130 B | `getAvailableServers()` 返回 `cert_fingerprint` + `cert_pem`；`ServerService` 持久化（仅在值变化时写库，避免每次 WebSocket 上报都触发 UPDATE） |
+| `Http/Controllers/V2/Admin/Server/MachineController.php` | +~70 行 | 改写 `buildInstallCommand()`，把 `/server/machine` 页面显示的安装命令模板替换成 `xboard-node-key` 版，并新增 `resolveNodePanelUrl()` 优先从 `server_ws_url` 提取 panel 域名 |
 
 ### 9.2 General.php 关键设计
 
@@ -273,6 +274,81 @@ if (!$useV2rayNFormat && data_get($server, 'cert_pem')) {
 - 修复前：`tuic://...?sni=...&insecure=1#...`
 - 修复后：`tuic://...?sni=...&pinSHA256=7565118EFDDD7411...&insecure=0#...`
 
+### 9.4 MachineController.php 改动（machine 页面安装命令）
+
+`/server/machine?machine_id=N` admin 页面会显示给管理员一行"安装 node"命令，原本指向官方仓库 `cedar2025/xboard-node`。本补丁把它替换成 `xboard-node-key` 版，同时改用 WebSocket 域名作为 `--panel` 参数。
+
+**改动前**（原 `buildInstallCommand()` 方法）：
+
+```php
+private function buildInstallCommand(Request $request, ServerMachine $machine): string
+{
+    $panelUrl = rtrim((string) (admin_setting('app_url') ?: $request->getSchemeAndHttpHost()), '/');
+    $installerUrl = 'https://raw.githubusercontent.com/cedar2025/xboard-node/dev/install.sh';
+
+    return sprintf(
+        'curl -fsSL %s | sudo bash -s -- --mode machine --panel %s --token %s --machine-id %d',
+        $installerUrl,
+        escapeshellarg($panelUrl),
+        escapeshellarg($machine->token),
+        $machine->id
+    );
+}
+```
+
+**改动后**：
+
+```php
+private function buildInstallCommand(Request $request, ServerMachine $machine): string
+{
+    $panelUrl = $this->resolveNodePanelUrl($request);
+    $installerUrl = 'https://raw.githubusercontent.com/pandanetworkgroup/xboard-node-key/main/install.sh';
+
+    return sprintf(
+        'curl -fsSL %s | sudo bash -s -- --mode machine --panel %s --token %s --machine-id %d',
+        $installerUrl,
+        escapeshellarg($panelUrl),
+        escapeshellarg($machine->token),
+        $machine->id
+    );
+}
+
+/**
+ * 优先级：
+ *   1. server_ws_url host  (例: wss://node.example.com/ws -> https://node.example.com)
+ *   2. app_url setting     (例: https://panel.example.com)
+ *   3. 当前请求 scheme + host (兜底)
+ */
+private function resolveNodePanelUrl(Request $request): string
+{
+    $wsUrl = (string) admin_setting('server_ws_url', '');
+    if ($wsUrl !== '') {
+        $httpsUrl = preg_replace('#^wss://#i', 'https://', $wsUrl);
+        $httpsUrl = preg_replace('#^ws://#i', 'http://', $httpsUrl);
+        if (preg_match('#^https?://[^/]+#i', $httpsUrl, $m)) {
+            return rtrim($m[0], '/');
+        }
+    }
+
+    $appUrl = rtrim((string) admin_setting('app_url'), '/');
+    if ($appUrl !== '') {
+        return $appUrl;
+    }
+
+    return rtrim($request->getSchemeAndHttpHost(), '/');
+}
+```
+
+**为什么用 `server_ws_url` 而不是 `app_url`**：
+- `app_url` 是订阅用的"面板面板域名"（例：`https://pan.178278.xyz`）
+- `server_ws_url` 才是 node 实际 WebSocket 通信用的域名（例：`wss://node.178278.xyz/ws`）
+- `xboard-node-key` 的 `install.sh` 把 `--panel` 写入 `config.yml` 的 `panel.url`，node 用它推导 ws 地址；如果用 `app_url`，node 会去连订阅域名而非 ws 域名，可能导致 404 或证书错误
+- 把 `wss://node.example.com/ws` 转换成 `https://node.example.com`（剥协议 + 路径），node 二进制内部会再加回 `wss://` 和 `/ws`
+
+**其他参数不变**：
+- `--token` 仍使用 `ServerMachine::token`（`Str::random(32)` 生成的）
+- `--machine-id` 仍使用 `$machine->id`（数字 ID）
+
 ---
 
 ## 10. 已知限制
@@ -314,7 +390,7 @@ Reality 协议本身不需要 cert pinning。如果某节点 `protocol_settings.
 | 主脚本 | `install-panel.sh` | 部署 + 回滚一体化脚本（纯 ASCII，bash） |
 | 英文说明 | `README.md` | 英文版使用指南 |
 | 中文指南 | `GUIDE.zh-CN.md` | 本文件 |
-| 离线包 | Release `cert-deploy-bundle.tar.gz` | 8 个补丁 PHP 文件，BOM 已剥，POSIX 路径 |
+| 离线包 | Release `cert-deploy-bundle.tar.gz` | 9 个补丁 PHP 文件，BOM 已剥，POSIX 路径 |
 
 ### Release 包内容
 
@@ -327,6 +403,7 @@ Protocols/Stash.php
 Protocols/Surfboard.php
 Protocols/Surge.php
 Services/ServerService.php
+Http/Controllers/V2/Admin/Server/MachineController.php
 ```
 
 ---
