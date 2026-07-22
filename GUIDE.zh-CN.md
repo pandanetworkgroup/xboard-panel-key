@@ -152,7 +152,7 @@ sudo bash install-panel.sh --container my-xboard-1 --app-root /var/www/html
 
 ### 5.1 默认回滚（同时清空 DB cert 字段）
 
-恢复原始 8 个 PHP 文件，**并** 把 `v2_server` 表的 `cert_fingerprint` / `cert_pem` 字段置 NULL。客户端下次拉订阅会立刻回退到 `insecure: true`。
+恢复原始 9 个 PHP 文件，**并** 把 `v2_server` 表的 `cert_fingerprint` / `cert_pem` 字段置 NULL。客户端下次拉订阅会立刻回退到 `insecure: true`。
 
 ```bash
 sudo bash install-panel.sh --rollback
@@ -168,15 +168,32 @@ sudo bash install-panel.sh --rollback --keep-db
 
 > 若 `/root/php_pre_cert_deploy/` 不存在或里面没有可用 PHP 文件（扁平 / 嵌套布局都行），回滚会拒绝执行。
 
+### 5.3 升级（回滚 + 重新部署）
+
+当有新版补丁发布时，使用 `--upgrade` 一步完成回滚 + 重新部署：
+
+```bash
+sudo bash install-panel.sh --upgrade
+```
+
+流程等价于先执行 `--rollback`（恢复原始 PHP + 清空 DB cert 字段），再执行完整部署：
+
+1. 恢复 `/root/php_pre_cert_deploy/` 中的 9 个原始 PHP 文件
+2. 清空 `v2_server` 表的 `cert_fingerprint` + `cert_pem`
+3. 清理 Laravel 缓存 + 重启容器
+4. 从 GitHub Release 下载最新 `cert-deploy-bundle.tar.gz`
+5. 执行完整部署流程（复制新文件 → 剥 BOM → php -l → 缓存清理 → 重启 → 自检）
+
 ---
 
 ## 6. CLI 参数
 
 ```
-Xboard panel-side cert-fingerprint installer (deploy / rollback / detect) v1.1.0
+Xboard panel-side cert-fingerprint installer (deploy / rollback / detect / upgrade) v1.1.0
 
 Args:
   --detect                 仅扫描并打印环境信息，不做任何修改
+  --upgrade                回滚到原始 PHP，然后重新部署最新版
   --rollback               回滚到部署前备份（默认同时清空 DB cert 字段）
   --keep-db                仅回滚 PHP 文件，保留 DB cert 字段
   --container NAME         Xboard docker 容器名（省略时自动检测）
