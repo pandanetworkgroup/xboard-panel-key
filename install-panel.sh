@@ -7,8 +7,15 @@
 # docker container). It needs:
 #   * root (or sudo) for docker access
 #   * docker CLI available on PATH
-#   * the xboard container running (default name: xboard-xboard-1)
+#   * the xboard container running (auto-detected or override with --container)
 #   * internet access to raw.githubusercontent.com / api.github.com (unless --bundle is given)
+#
+# The script auto-detects:
+#   * the Xboard docker container name (scans all running containers)
+#   * the app root directory inside the container (/www/app, /var/www/html, etc.)
+#   * the docker-compose project directory on the host
+#
+# Use --detect to only scan and print the environment without deploying.
 #
 # ----------------------------------------------------------------------------
 # Common usage
@@ -24,15 +31,19 @@
 #    curl -fsSL https://raw.githubusercontent.com/pandanetworkgroup/xboard-panel-key/main/install-panel.sh -o install-panel.sh
 #    sudo bash install-panel.sh
 #
-# 3) Rollback to the pre-deploy backup, AND clear DB cert fields (default):
+# 3) Detect only (print environment, no changes):
+#
+#    sudo bash install-panel.sh --detect
+#
+# 4) Rollback to the pre-deploy backup, AND clear DB cert fields (default):
 #
 #    sudo bash install-panel.sh --rollback
 #
-# 4) Rollback but keep DB cert fields intact (nodes will keep using cert pinning):
+# 5) Rollback but keep DB cert fields intact (nodes will keep using cert pinning):
 #
 #    sudo bash install-panel.sh --rollback --keep-db
 #
-# 5) Offline deploy using a local tar.gz bundle:
+# 6) Offline deploy using a local tar.gz bundle:
 #
 #    sudo bash install-panel.sh --bundle ./cert-deploy-bundle.tar.gz
 #
@@ -41,10 +52,16 @@ set -euo pipefail
 
 # ==================== Constants ====================
 REPO="pandanetworkgroup/xboard-panel-key"
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.1.0"
 
-# Default container name (Xboard docker-compose default)
-DEF_CONTAINER="xboard-xboard-1"
+# Candidate container names to try (in order) when auto-detecting
+DEF_CONTAINER_CANDIDATES=( "xboard-xboard-1" "xboard-1" "xboard" )
+
+# Candidate app roots to probe inside containers
+DEF_APP_ROOT_CANDIDATES=( "/www/app" "/var/www/html" "/app" "/var/www/app" )
+
+# Candidate compose directories on the host
+DEF_COMPOSE_DIR_CANDIDATES=( "/www/wwwroot/xboard" "/www/wwwroot/178278.xyz" "/root/xboard" "/opt/xboard" "/www/wwwroot" )
 
 # Health-check URL candidates tried in order (first wins).
 # Order rationale: most Baota/Nginx-proxied setups return 200 on :80 while
@@ -69,7 +86,9 @@ PHP_FILES=(
     "Services/ServerService.php"
     "Http/Controllers/V2/Admin/Server/MachineController.php"
 )
+# APP_ROOT is auto-detected at runtime; fallback to /www/app
 APP_ROOT="/www/app"
+COMPOSE_DIR=""  # auto-detected
 
 # ==================== Logging ====================
 if [ -t 2 ]; then
@@ -80,10 +99,11 @@ fi
 log()  { printf '%s[install]%s %s\n' "$C_GREEN"  "$C_OFF" "$*"; }
 warn() { printf '%s[warn]%s %s\n'    "$C_YELLOW" "$C_OFF" "$*" >&2; }
 die()  { printf '%s[error]%s %s\n'   "$C_RED"    "$C_OFF" "$*" >&2; exit 1; }
+hr()   { printf '%s---%s\n' "$C_YELLOW" "$C_OFF"; }
 
 # ==================== Args ====================
-MODE="deploy"          # deploy | rollback
-CONTAINER="$DEF_CONTAINER"
+MODE="deploy"          # deploy | rollback | detect
+CONTAINER=""            # auto-detected if empty
 BACKUP_DIR="$DEF_BACKUP_DIR"
 WORK_DIR="$DEF_WORK_DIR"
 HEALTH_URLS=( "${DEF_HEALTH_URLS[@]}" )
@@ -95,11 +115,14 @@ SKIP_SELFTEST=0
 
 usage() {
     cat <<'USAGE_EOF'
-Xboard panel-side cert-fingerprint installer (deploy / rollback)
+Xboard panel-side cert-fingerprint installer (deploy / rollback / detect) v1.1.0
 
 One-line deploy (recommended):
   curl -fsSL https://raw.githubusercontent.com/pandanetworkgroup/xboard-panel-key/main/install-panel.sh \
     | sudo bash -s -
+
+Detect only (scan environment, no changes):
+  sudo bash install-panel.sh --detect
 
 Interactive deploy:
   sudo bash install-panel.sh
@@ -115,10 +138,21 @@ Deploys 9 PHP files:
   1 admin MachineController.php -> renders the xboard-node-key one-liner on the
   /server/machine page, using server_ws_url host as --panel
 
+Auto-detection:
+  If --container is not given, the script scans all running Docker containers
+  and picks the first one whose filesystem contains an app/Protocols directory.
+  The app root (/www/app, /var/www/html, etc.) is auto-detected by probing
+  candidate paths inside the container.
+  The docker-compose directory on the host is detected by searching common
+  paths for docker-compose.yml.
+
 Args:
+  --detect                 scan and print environment only, no changes
   --rollback               rollback to the pre-deploy backup (default also clears DB)
   --keep-db                rollback only, keep cert_fingerprint / cert_pem in DB
-  --container NAME         xboard docker container name (default: xboard-xboard-1)
+  --container NAME         xboard docker container name (auto-detected if omitted)
+  --app-root PATH          app root inside container (auto-detected if omitted)
+  --compose-dir DIR        docker-compose directory on host (auto-detected if omitted)
   --backup-dir DIR         host backup dir (default: /root/php_pre_cert_deploy)
   --work-dir DIR           host working dir for unpack (default: /root/cert-deploy-work)
   --health-url URL         health-check URL (repeatable; default: http://127.0.0.1/ , http://127.0.0.1:7001/)
@@ -132,9 +166,12 @@ USAGE_EOF
 
 while [ $# -gt 0 ]; do
     case "$1" in
+        --detect)          MODE="detect"; shift ;;
         --rollback)        MODE="rollback"; shift ;;
         --keep-db)         KEEP_DB=1; shift ;;
         --container)       CONTAINER="$2"; shift 2 ;;
+        --app-root)        APP_ROOT="$2"; shift 2 ;;
+        --compose-dir)     COMPOSE_DIR="$2"; shift 2 ;;
         --backup-dir)      BACKUP_DIR="$2"; shift 2 ;;
         --work-dir)        WORK_DIR="$2"; shift 2 ;;
         --health-url)      HEALTH_URLS+=( "$2" ); shift 2 ;;
@@ -156,15 +193,183 @@ command -v docker >/dev/null 2>&1 || die "docker CLI not found. install docker f
 command -v curl   >/dev/null 2>&1 || die "curl not found. install curl first."
 command -v tar    >/dev/null 2>&1 || die "tar not found. install tar first."
 
-# Verify the container exists and is running
-if ! docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q '^true$'; then
-    die "container '$CONTAINER' is not running. pass --container NAME to override."
-fi
-log "container: $CONTAINER  (state: running)"
+# ==================== Auto-detection ====================
 
-# Verify the container app layout looks like Xboard
+# Detect the Xboard docker container by scanning running containers.
+# Strategy:
+#   1. If --container was given, use it directly.
+#   2. Try well-known names (xboard-xboard-1, xboard-1, xboard).
+#   3. Scan ALL running containers and probe each for app/Protocols.
+detect_container() {
+    # If user specified --container, verify it
+    if [ -n "$CONTAINER" ]; then
+        if ! docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q '^true$'; then
+            die "container '$CONTAINER' (from --container) is not running."
+        fi
+        log "container: $CONTAINER (from --container, state: running)"
+        return 0
+    fi
+
+    log "auto-detecting Xboard container..."
+
+    # Step 1: try well-known names
+    for name in "${DEF_CONTAINER_CANDIDATES[@]}"; do
+        if docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null | grep -q '^true$'; then
+            log "  candidate: $name (running)"
+            CONTAINER="$name"
+            # Verify it looks like Xboard by probing app roots
+            if detect_app_root "$CONTAINER" 2>/dev/null; then
+                log "  -> confirmed: $CONTAINER (app root: $APP_ROOT)"
+                return 0
+            fi
+            log "  -> $name running but no app/Protocols found, keep scanning"
+            CONTAINER=""
+        fi
+    done
+
+    # Step 2: scan all running containers
+    local all_containers
+    all_containers=$(docker ps --format '{{.Names}}' 2>/dev/null || true)
+    [ -n "$all_containers" ] || die "no running docker containers found."
+
+    local found=0
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        log "  scanning: $name"
+        if detect_app_root "$name" 2>/dev/null; then
+            CONTAINER="$name"
+            found=1
+            log "  -> confirmed: $CONTAINER (app root: $APP_ROOT)"
+            break
+        fi
+    done <<< "$all_containers"
+
+    [ "$found" -eq 1 ] || die "could not auto-detect Xboard container. pass --container NAME to override."
+}
+
+# Detect the app root directory inside a container by probing candidate paths.
+# Sets APP_ROOT on success. Returns 0 if found, 1 otherwise.
+detect_app_root() {
+    local c="$1"
+    for root in "${DEF_APP_ROOT_CANDIDATES[@]}"; do
+        if docker exec "$c" test -d "$root/Protocols" 2>/dev/null; then
+            # Extra sanity: check for artisan (Xboard uses Laravel)
+            if docker exec "$c" test -f "$(dirname "$root")/artisan" 2>/dev/null \
+               || docker exec "$c" test -f "$root/../artisan" 2>/dev/null \
+               || docker exec "$c" test -f "$root/artisan" 2>/dev/null; then
+                APP_ROOT="$root"
+                return 0
+            fi
+            # Even without artisan, Protocols dir is a strong enough signal
+            APP_ROOT="$root"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Detect the docker-compose directory on the host.
+# Sets COMPOSE_DIR on success.
+detect_compose_dir() {
+    [ -n "$COMPOSE_DIR" ] && return 0
+
+    for dir in "${DEF_COMPOSE_DIR_CANDIDATES[@]}"; do
+        if [ -f "$dir/docker-compose.yml" ] || [ -f "$dir/docker-compose.yaml" ]; then
+            COMPOSE_DIR="$dir"
+            return 0
+        fi
+    done
+
+    # Fallback: inspect the container's compose label
+    if [ -n "$CONTAINER" ]; then
+        local compose_project
+        compose_project=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$CONTAINER" 2>/dev/null || true)
+        if [ -n "$compose_project" ] && [ -d "$compose_project" ]; then
+            COMPOSE_DIR="$compose_project"
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+# Print a full environment report (used by --detect and at deploy start).
+print_environment() {
+    echo
+    hr
+    echo " Xboard Environment Report"
+    hr
+    echo "  Container:     $CONTAINER"
+    echo "  App Root:      $APP_ROOT"
+    echo "  Compose Dir:   ${COMPOSE_DIR:-<not found>}"
+    echo "  Backup Dir:    $BACKUP_DIR"
+    echo "  Work Dir:      $WORK_DIR"
+    echo "  Health URLs:   ${HEALTH_URLS[*]}"
+    echo
+    echo "  Container status:"
+    docker inspect -f '    State: {{.State.Status}}
+    Image:  {{.Config.Image}}
+    Ports:  {{range $p, $conf := .NetworkSettings.Ports}}{{range $conf}}{{.HostPort}} {{end}}{{end}}' "$CONTAINER" 2>/dev/null || true
+    echo
+    echo "  PHP files in container:"
+    for rel in "${PHP_FILES[@]}"; do
+        local name
+        name=$(basename "$rel")
+        local cpath="$APP_ROOT/$rel"
+        if docker exec "$CONTAINER" test -f "$cpath" 2>/dev/null; then
+            local size
+            size=$(docker exec "$CONTAINER" stat -c '%s' "$cpath" 2>/dev/null || echo "?")
+            local patched="no"
+            if docker exec "$CONTAINER" grep -qE 'cert_fingerprint|computeCertSha256|applyCertFingerprint|buildV2rayNFormat' "$cpath" 2>/dev/null; then
+                patched="YES"
+            fi
+            printf '    %-50s %6s bytes  patched=%s\n' "$rel" "$size" "$patched"
+        else
+            printf '    %-50s MISSING\n' "$rel"
+        fi
+    done
+    echo
+    echo "  Backup files:"
+    if [ -d "$BACKUP_DIR" ]; then
+        for rel in "${PHP_FILES[@]}"; do
+            local name
+            name=$(basename "$rel")
+            if [ -f "$BACKUP_DIR/$name" ]; then
+                printf '    %-50s OK\n' "$name"
+            else
+                printf '    %-50s -\n' "$name"
+            fi
+        done
+    else
+        echo "    (no backup directory)"
+    fi
+    echo
+    echo "  DB cert status:"
+    docker exec "$CONTAINER" php /www/artisan tinker --execute='
+        use App\Models\Server;
+        $t = Server::count();
+        $c = Server::whereNotNull("cert_fingerprint")->count();
+        echo "    total=$t with_cert=$c without=" . ($t - $c) . "\n";
+    ' 2>/dev/null || echo "    (tinker failed)"
+    echo
+    hr
+}
+
+# ==================== Run detection ====================
+detect_container
+detect_compose_dir || true
+
+# Verify the container looks like Xboard
 if ! docker exec "$CONTAINER" test -d "$APP_ROOT/Protocols" 2>/dev/null; then
     die "container '$CONTAINER' does not have $APP_ROOT/Protocols/. is this an Xboard container?"
+fi
+log "container: $CONTAINER  (app root: $APP_ROOT, state: running)"
+
+# --detect mode: print environment and exit
+if [ "$MODE" = "detect" ]; then
+    print_environment
+    log "detect mode: no changes made. use without --detect to deploy."
+    exit 0
 fi
 
 # ==================== Helpers ====================
@@ -425,9 +630,12 @@ do_selftest() {
 log "==== Xboard panel cert-fingerprint installer v$SCRIPT_VERSION ===="
 log "repo:      https://github.com/$REPO"
 log "container: $CONTAINER"
+log "app root:  $APP_ROOT"
+log "compose:   ${COMPOSE_DIR:-<not found>}"
 log "backup:    $BACKUP_DIR"
 
 case "$MODE" in
+    detect)   print_environment; log "detect mode: no changes made." ;;
     deploy)   do_deploy   ;;
     rollback) do_rollback ;;
     *)        die "internal error: unknown mode '$MODE'" ;;
