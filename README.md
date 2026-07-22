@@ -91,7 +91,7 @@ container). It needs:
 
 - `root` (or `sudo`) for docker access
 - `docker` CLI on `PATH`
-- The Xboard container running (default name: `xboard-xboard-1`)
+- The Xboard container running (container name is **auto-detected** since v1.1.0)
 - Internet access to `raw.githubusercontent.com` / `api.github.com`
   (unless you pass `--bundle` for offline install)
 
@@ -125,6 +125,16 @@ This will:
 7. `docker restart xboard-xboard-1`
 8. HTTP self-test against `http://127.0.0.1:7001/` then `http://127.0.0.1/`
 9. Print a verify command for you to run 60-90s later
+
+### Detect only (scan environment, no changes)
+
+```bash
+sudo bash install-panel.sh --detect
+```
+
+This prints a full environment report (container name, app root, compose dir,
+PHP file patch status, backup status, DB cert counts) without making any changes.
+Useful for pre-flight checks or troubleshooting.
 
 ### Interactive deploy (download first)
 
@@ -173,18 +183,34 @@ sudo bash install-panel.sh --rollback --keep-db
 
 ---
 
+## Auto-detection (v1.1.0+)
+
+Since v1.1.0, the script automatically detects the Xboard environment:
+
+| Item              | Detection strategy                                                                 |
+| ----------------- | ---------------------------------------------------------------------------------- |
+| Container name    | Scans all running Docker containers, probes each for `app/Protocols` directory     |
+| App root          | Probes `/www/app`, `/var/www/html`, `/app`, `/var/www/app` inside the container    |
+| Compose directory | Probes common host paths (`/www/wwwroot/xboard`, etc.) + Docker compose labels      |
+
+All auto-detected values can be overridden with `--container`, `--app-root`,
+or `--compose-dir`. Use `--detect` to see what the script finds before deploying.
+
 ## CLI reference
 
 ```
-Xboard panel-side cert-fingerprint installer (deploy / rollback)
+Xboard panel-side cert-fingerprint installer (deploy / rollback / detect) v1.1.0
 
 Args:
+  --detect                 scan and print environment only, no changes
   --rollback               rollback to the pre-deploy backup (default also clears DB)
   --keep-db                rollback only, keep cert_fingerprint / cert_pem in DB
-  --container NAME         xboard docker container name (default: xboard-xboard-1)
+  --container NAME         xboard docker container name (auto-detected if omitted)
+  --app-root PATH          app root inside container (auto-detected if omitted)
+  --compose-dir DIR        docker-compose directory on host (auto-detected if omitted)
   --backup-dir DIR         host backup dir (default: /root/php_pre_cert_deploy)
   --work-dir DIR           host working dir for unpack (default: /root/cert-deploy-work)
-  --health-url URL         health-check URL (repeatable; default: http://127.0.0.1:7001/ , http://127.0.0.1/)
+  --health-url URL         health-check URL (repeatable; default: http://127.0.0.1/ , http://127.0.0.1:7001/)
   --bundle PATH            use a local tar.gz bundle instead of downloading from GitHub
   --release-tag TAG        github release tag to fetch (default: latest)
   --force-rebackup         re-take a backup even if one already exists
@@ -194,10 +220,16 @@ Args:
 
 ### Common overrides
 
-Non-default container name:
+Non-default container name (skip auto-detection):
 
 ```bash
 sudo bash install-panel.sh --container my-xboard-1
+```
+
+Non-default app root inside container:
+
+```bash
+sudo bash install-panel.sh --app-root /var/www/html
 ```
 
 Panel exposed on a non-default port (via Baota/Nginx proxy on 80):
@@ -303,11 +335,11 @@ tar -czf cert-deploy-bundle.tar.gz \
 
 ## Validated deployment
 
-This bundle has been deployed end-to-end on a production Xboard panel host
+This bundle has been deployed end-to-end on production Xboard panel hosts
 (docker container, Baota+Nginx reverse proxy on :80, Caddy on :7001). The
-installer ran cleanly through all 9 stages: backup -> copy -> BOM strip ->
-`php -l` -> `artisan optimize:clear` -> `docker restart` -> HTTP self-test
-`http://127.0.0.1/` -> HTTP 200.
+installer ran cleanly through all 9 stages: detect -> backup -> copy -> BOM
+strip -> `php -l` -> `artisan optimize:clear` -> `docker restart` -> HTTP
+self-test `http://127.0.0.1/` -> HTTP 200.
 
 Post-deploy file sizes inside the container (for your reference when verifying
 your own deploy; absolute sizes may shift slightly with patch revisions):
