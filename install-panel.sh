@@ -61,7 +61,7 @@ DEF_CONTAINER_CANDIDATES=( "xboard-xboard-1" "xboard-1" "xboard" )
 DEF_APP_ROOT_CANDIDATES=( "/www/app" "/var/www/html" "/app" "/var/www/app" )
 
 # Candidate compose directories on the host
-DEF_COMPOSE_DIR_CANDIDATES=( "/www/wwwroot/xboard" "/www/wwwroot/178278.xyz" "/root/xboard" "/opt/xboard" "/www/wwwroot" )
+DEF_COMPOSE_DIR_CANDIDATES=( "/www/wwwroot/xboard" "/www/wwwroot/*board*" "/root/xboard" "/opt/xboard" "/www/wwwroot" )
 
 # Health-check URL candidates tried in order (first wins).
 # Order rationale: most Baota/Nginx-proxied setups return 200 on :80 while
