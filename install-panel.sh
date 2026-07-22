@@ -102,7 +102,7 @@ die()  { printf '%s[error]%s %s\n'   "$C_RED"    "$C_OFF" "$*" >&2; exit 1; }
 hr()   { printf '%s---%s\n' "$C_YELLOW" "$C_OFF"; }
 
 # ==================== Args ====================
-MODE="deploy"          # deploy | rollback | detect
+MODE="deploy"          # deploy | rollback | detect | upgrade
 CONTAINER=""            # auto-detected if empty
 BACKUP_DIR="$DEF_BACKUP_DIR"
 WORK_DIR="$DEF_WORK_DIR"
@@ -115,7 +115,7 @@ SKIP_SELFTEST=0
 
 usage() {
     cat <<'USAGE_EOF'
-Xboard panel-side cert-fingerprint installer (deploy / rollback / detect) v1.1.0
+Xboard panel-side cert-fingerprint installer (deploy / rollback / detect / upgrade) v1.1.0
 
 One-line deploy (recommended):
   curl -fsSL https://raw.githubusercontent.com/pandanetworkgroup/xboard-panel-key/main/install-panel.sh \
@@ -129,6 +129,9 @@ Interactive deploy:
 
 Rollback (default also clears DB cert fields):
   sudo bash install-panel.sh --rollback [--keep-db]
+
+Upgrade (rollback to original, then redeploy from latest release):
+  sudo bash install-panel.sh --upgrade
 
 Offline deploy with a local bundle:
   sudo bash install-panel.sh --bundle ./cert-deploy-bundle.tar.gz
@@ -148,6 +151,7 @@ Auto-detection:
 
 Args:
   --detect                 scan and print environment only, no changes
+  --upgrade                rollback to original, then redeploy from latest release
   --rollback               rollback to the pre-deploy backup (default also clears DB)
   --keep-db                rollback only, keep cert_fingerprint / cert_pem in DB
   --container NAME         xboard docker container name (auto-detected if omitted)
@@ -167,6 +171,7 @@ USAGE_EOF
 while [ $# -gt 0 ]; do
     case "$1" in
         --detect)          MODE="detect"; shift ;;
+        --upgrade)         MODE="upgrade"; shift ;;
         --rollback)        MODE="rollback"; shift ;;
         --keep-db)         KEEP_DB=1; shift ;;
         --container)       CONTAINER="$2"; shift 2 ;;
@@ -626,6 +631,39 @@ do_selftest() {
     return 0
 }
 
+# ==================== Upgrade branch ====================
+do_upgrade() {
+    log "mode: upgrade (rollback + redeploy)"
+    hr
+    log "Step 1/2: rollback to original PHP files"
+    hr
+
+    [ -d "$BACKUP_DIR" ] || die "no backup dir at $BACKUP_DIR. nothing to upgrade from."
+    local n
+    n=$(count_backup_files)
+    [ "$n" -gt 0 ] || die "backup dir $BACKUP_DIR has no findable PHP files. nothing to upgrade from."
+    log "backup files findable: $n/9"
+
+    restore_from_backup
+
+    # Always clear DB cert fields for a clean upgrade
+    clear_db_cert_fields
+
+    log "clearing Laravel cache"
+    docker exec "$CONTAINER" php /www/artisan optimize:clear 2>&1 | sed 's/^/  /' || true
+
+    log "restarting container: $CONTAINER"
+    docker restart "$CONTAINER" >/dev/null
+    sleep 4
+
+    hr
+    log "Step 2/2: redeploy from latest release"
+    hr
+
+    # Now do a fresh deploy (backup already exists, won't re-backup)
+    do_deploy
+}
+
 # ==================== Entry ====================
 log "==== Xboard panel cert-fingerprint installer v$SCRIPT_VERSION ===="
 log "repo:      https://github.com/$REPO"
@@ -638,6 +676,7 @@ case "$MODE" in
     detect)   print_environment; log "detect mode: no changes made." ;;
     deploy)   do_deploy   ;;
     rollback) do_rollback ;;
+    upgrade)  do_upgrade  ;;
     *)        die "internal error: unknown mode '$MODE'" ;;
 esac
 
@@ -655,5 +694,8 @@ elif [ "$MODE" = "rollback" ]; then
         log "DB cert fields: CLEARED (nodes will fall back to insecure:true until node-side is also rolled back)"
     fi
     log "re-deploy later: sudo bash install-panel.sh"
+elif [ "$MODE" = "upgrade" ]; then
+    log "upgrade complete: original files restored, new patch deployed"
+    log "next: wait 60-90s for node websockets to republish cert_fingerprint / cert_pem"
 fi
 echo
