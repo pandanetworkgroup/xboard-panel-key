@@ -4,6 +4,8 @@
 
 > 配套 Node 侧补丁仓库：<https://github.com/pandanetworkgroup/xboard-node-key>
 
+**当前版本：v1.1.0** — 新增自动检测容器名/应用根目录/Compose 目录、`--detect` 模式、环境报告功能。
+
 ---
 
 ## 1. 功能说明
@@ -63,7 +65,7 @@ Node 端 (xboard-node 带改动二进制)
 
 - `root`（或 `sudo`）权限
 - `docker` CLI 可用
-- Xboard 容器正在运行（默认名 `xboard-xboard-1`，可用 `--container` 覆盖）
+- Xboard 容器正在运行（**v1.1.0 起容器名自动检测**，可用 `--container` 覆盖）
 - 能访问 `raw.githubusercontent.com` / `api.github.com`（或用 `--bundle` 离线部署）
 
 **部署前请确认 Node 侧补丁已先部署到所有上报 cert 的节点。** 否则面板 DB 没有 `cert_fingerprint` / `cert_pem` 字段，订阅仍然输出 `insecure: true`。
@@ -72,9 +74,37 @@ Node 端 (xboard-node 带改动二进制)
 
 ---
 
+## 3.5 自动检测（v1.1.0 新增）
+
+v1.1.0 版本引入全自动环境检测机制，无需手动指定容器名和路径：
+
+| 检测项 | 检测策略 |
+| --- | --- |
+| 容器名 | 扫描所有运行中的 Docker 容器，探测哪个容器包含 `app/Protocols` 目录 |
+| 应用根目录 | 在容器内探测 `/www/app`、`/var/www/html`、`/app`、`/var/www/app` |
+| Compose 目录 | 探测宿主机常见路径（`/www/wwwroot/xboard` 等）+ Docker compose 标签 |
+
+所有自动检测的值均可通过 `--container`、`--app-root`、`--compose-dir` 参数手动覆盖。
+
+使用 `--detect` 模式可仅扫描并打印环境信息，不做任何修改：
+
+```bash
+sudo bash install-panel.sh --detect
+```
+
+输出包含：容器名、应用根目录、Compose 目录、PHP 文件 patch 状态、备份状态、DB cert 数量。
+
+---
+
 ## 4. 快速部署
 
-### 4.1 一行命令部署（推荐）
+### 4.1 环境检测（推荐先执行）
+
+```bash
+sudo bash install-panel.sh --detect
+```
+
+### 4.2 一行命令部署（推荐）
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/pandanetworkgroup/xboard-panel-key/main/install-panel.sh \
@@ -83,17 +113,18 @@ curl -fsSL https://raw.githubusercontent.com/pandanetworkgroup/xboard-panel-key/
 
 脚本会自动完成：
 
-1. 从 GitHub Release 下载 `cert-deploy-bundle.tar.gz`
-2. 把容器内当前 9 个 PHP 文件备份到 `/root/php_pre_cert_deploy/`（仅当该目录为空时；已存在则跳过以保护初始备份）
-3. 将 9 个补丁版 PHP 文件 `docker cp` 进容器 `/www/app/...`
-4. 容器内 `sed` 防御性剥除 UTF-8 BOM（幂等）
-5. 对 9 个文件逐个执行 `php -l` 语法检查；任一失败**自动回滚**后退出
-6. `docker exec ... php /www/artisan optimize:clear` 清 Laravel 缓存
-7. `docker restart <容器>` 重启容器使新字节码生效（OPcache 必须重启才更新）
-8. 对 `http://127.0.0.1/` 和 `http://127.0.0.1:7001/` 做健康自检
-9. 打印 60-90 秒后的 DB 验证命令
+1. **自动检测**容器名、应用根目录、Compose 目录
+2. 从 GitHub Release 下载 `cert-deploy-bundle.tar.gz`
+3. 把容器内当前 9 个 PHP 文件备份到 `/root/php_pre_cert_deploy/`（仅当该目录为空时；已存在则跳过以保护初始备份）
+4. 将 9 个补丁版 PHP 文件 `docker cp` 进容器
+5. 容器内 `sed` 防御性剥除 UTF-8 BOM（幂等）
+6. 对 9 个文件逐个执行 `php -l` 语法检查；任一失败**自动回滚**后退出
+7. `docker exec ... php /www/artisan optimize:clear` 清 Laravel 缓存
+8. `docker restart <容器>` 重启容器使新字节码生效（OPcache 必须重启才更新）
+9. 对 `http://127.0.0.1/` 和 `http://127.0.0.1:7001/` 做健康自检
+10. 打印 60-90 秒后的 DB 验证命令
 
-### 4.2 交互式部署（先下载再跑）
+### 4.3 交互式部署（先下载再跑）
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/pandanetworkgroup/xboard-panel-key/main/install-panel.sh -o install-panel.sh
@@ -101,7 +132,7 @@ sudo bash install-panel.sh
 sudo bash install-panel.sh --help
 ```
 
-### 4.3 离线部署（无外网环境）
+### 4.4 离线部署（无外网环境）
 
 把 `install-panel.sh` 和 `cert-deploy-bundle.tar.gz` 都拷到面板服务器，然后：
 
@@ -109,10 +140,10 @@ sudo bash install-panel.sh --help
 sudo bash install-panel.sh --bundle ./cert-deploy-bundle.tar.gz
 ```
 
-### 4.4 非默认容器名
+### 4.5 非默认容器名 / 应用根目录
 
 ```bash
-sudo bash install-panel.sh --container my-xboard-1
+sudo bash install-panel.sh --container my-xboard-1 --app-root /var/www/html
 ```
 
 ---
@@ -142,12 +173,15 @@ sudo bash install-panel.sh --rollback --keep-db
 ## 6. CLI 参数
 
 ```
-Xboard panel-side cert-fingerprint installer (deploy / rollback)
+Xboard panel-side cert-fingerprint installer (deploy / rollback / detect) v1.1.0
 
 Args:
+  --detect                 仅扫描并打印环境信息，不做任何修改
   --rollback               回滚到部署前备份（默认同时清空 DB cert 字段）
   --keep-db                仅回滚 PHP 文件，保留 DB cert 字段
-  --container NAME         Xboard docker 容器名（默认 xboard-xboard-1）
+  --container NAME         Xboard docker 容器名（省略时自动检测）
+  --app-root PATH          容器内应用根目录（省略时自动检测）
+  --compose-dir DIR        宿主机 docker-compose 目录（省略时自动检测）
   --backup-dir DIR         宿主机备份目录（默认 /root/php_pre_cert_deploy）
   --work-dir DIR           宿主机解包工作目录（默认 /root/cert-deploy-work）
   --health-url URL         健康检查 URL（可重复；默认 http://127.0.0.1/ , http://127.0.0.1:7001/）
@@ -385,7 +419,7 @@ Reality 协议本身不需要 cert pinning。如果某节点 `protocol_settings.
 
 ## 11.5 已验证部署
 
-本补丁包已在生产环境（Xboard docker 容器 + 宝塔/Nginx 反代 :80 + Caddy :7001）端到端部署验证通过。安装脚本一遍跑完 9 个阶段：备份 → docker cp → 防御性剥 BOM → `php -l` → `artisan optimize:clear` → `docker restart` → HTTP 自检 `http://127.0.0.1/` → 返回 200。
+本补丁包已在生产环境（Xboard docker 容器 + 宝塔/Nginx 反代 :80 + Caddy :7001）端到端部署验证通过。安装脚本一遍跑完：自动检测 → 备份 → docker cp → 防御性剥 BOM → `php -l` → `artisan optimize:clear` → `docker restart` → HTTP 自检 `http://127.0.0.1/` → 返回 200。
 
 部署后容器内各文件字节数（供你部署后对照；不同补丁版本略有浮动）：
 
