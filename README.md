@@ -153,6 +153,27 @@ host, then run:
 sudo bash install-panel.sh --bundle ./cert-deploy-bundle.tar.gz
 ```
 
+## Upgrade
+
+When a new version of the patch bundle is released, use `--upgrade` to
+rollback to the original PHP files and then redeploy from the latest
+GitHub release in one step:
+
+```bash
+sudo bash install-panel.sh --upgrade
+```
+
+This is equivalent to running `--rollback` followed by a fresh deploy,
+ensuring a clean state:
+
+1. Restore the 9 original PHP files from `/root/php_pre_cert_deploy/`
+2. Clear `cert_fingerprint` + `cert_pem` in the `v2_server` table
+3. Clear Laravel cache + `docker restart`
+4. Download the latest `cert-deploy-bundle.tar.gz` from GitHub
+5. Deploy the new 9 PHP files (full deploy workflow)
+
+> If no `/root/php_pre_cert_deploy/` is found, upgrade will refuse to proceed.
+
 ---
 
 ## Rollback
@@ -199,10 +220,11 @@ or `--compose-dir`. Use `--detect` to see what the script finds before deploying
 ## CLI reference
 
 ```
-Xboard panel-side cert-fingerprint installer (deploy / rollback / detect) v1.1.0
+Xboard panel-side cert-fingerprint installer (deploy / rollback / detect / upgrade) v1.1.0
 
 Args:
   --detect                 scan and print environment only, no changes
+  --upgrade                rollback to original, then redeploy from latest release
   --rollback               rollback to the pre-deploy backup (default also clears DB)
   --keep-db                rollback only, keep cert_fingerprint / cert_pem in DB
   --container NAME         xboard docker container name (auto-detected if omitted)
